@@ -2,6 +2,9 @@
 
 [Simple fair and terminating backtracking Monad Transformer](https://okmij.org/ftp/Computation/monads.html#fair-bt-stream)
 
+For FS2 cancellation behavior and tagged output metrics, see the
+[FS2 guide](docs/index.md#fs2-cancellation-and-output-metrics).
+
 [Backtracking, Interleaving, and Terminating Monad Transformers](https://okmij.org/ftp/Computation/LogicT.pdf)
 
 ### Motivation

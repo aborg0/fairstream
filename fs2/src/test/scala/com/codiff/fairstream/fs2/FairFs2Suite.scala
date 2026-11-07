@@ -17,7 +17,9 @@
 package com.codiff.fairstream
 package fs2
 
+import cats.effect.Deferred
 import cats.effect.IO
+import cats.effect.Ref
 import cats.syntax.all._
 import munit.CatsEffectSuite
 
@@ -121,6 +123,79 @@ class FairFs2Suite extends CatsEffectSuite {
       result <- triples.toFs2.take(n.toLong).compile.toList
       expected <- FairT.runM[IO, (Int, Int, Int)](None, Some(n), triples)
     } yield assertEquals(result, expected)
+  }
+
+  test("FairT[IO].toFs2: take stops before evaluating later effects") {
+    for {
+      laterRuns <- Ref.of[IO, Int](0)
+      stream = FairT.mplus[IO, Int](
+        FairT.unit[IO, Int](1),
+        FairT.lift[IO, Int](laterRuns.update(_ + 1).as(2))
+      )
+      result <- stream.toFs2.take(1).compile.toList
+      count <- laterRuns.get
+    } yield {
+      assertEquals(result, List(1))
+      assertEquals(count, 0)
+    }
+  }
+
+  test("FairT[IO].toFs2: racing cancels a running effect and runs its finalizer") {
+    for {
+      started <- Deferred[IO, Unit]
+      finalized <- Deferred[IO, Unit]
+      stream = FairT.lift[IO, Unit](
+        started.complete(()).void *> IO.never[Unit].onCancel(finalized.complete(()).void)
+      )
+      _ <- IO.race(stream.toFs2.compile.drain, started.get)
+      _ <- finalized.get
+    } yield assert(true)
+  }
+
+  test("OutputMetrics counts only outputs in tagged regions") {
+    for {
+      metrics <- OutputMetrics.create[IO]
+      result <- metrics
+        .track("solutions")(
+          FairT.mplus[IO, Int](
+            FairT.unit[IO, Int](1),
+            FairT.unit[IO, Int](2)
+          ).toFs2
+        )
+        .take(1)
+        .compile
+        .toList
+      _ <- FairT.unit[IO, Int](3).toFs2.compile.drain
+      snapshot <- metrics.snapshot.start.flatMap(_.joinWithNever)
+      count <- metrics.count("missing")
+    } yield {
+      assertEquals(result, List(1))
+      assertEquals(snapshot, Map("solutions" -> 1L))
+      assertEquals(count, 0L)
+    }
+  }
+
+  test("OutputMetrics snapshots can be queried while a stream is running") {
+    for {
+      metrics <- OutputMetrics.create[IO]
+      firstOutput <- Deferred[IO, Unit]
+      continue <- Deferred[IO, Unit]
+      source =
+        _root_.fs2.Stream.emit(1).covary[IO] ++
+          _root_.fs2.Stream.eval(firstOutput.complete(()).void).drain ++
+          _root_.fs2.Stream.eval(continue.get).drain ++
+          _root_.fs2.Stream.emit(2).covary[IO]
+      fiber <- metrics.track("items")(source).compile.toList.start
+      _ <- firstOutput.get
+      duringRun <- metrics.snapshot.start.flatMap(_.joinWithNever)
+      _ <- continue.complete(())
+      result <- fiber.joinWithNever
+      finalSnapshot <- metrics.snapshot
+    } yield {
+      assertEquals(duringRun, Map("items" -> 1L))
+      assertEquals(result, List(1, 2))
+      assertEquals(finalSnapshot, Map("items" -> 2L))
+    }
   }
 
   // -- Plain fs2.Stream vs Fair interleaving --
